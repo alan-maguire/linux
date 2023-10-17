@@ -1318,7 +1318,7 @@ static inline int bpf_trampoline_unlink_prog(struct bpf_tramp_link *link,
 static inline struct bpf_trampoline *bpf_trampoline_get(u64 key,
 							struct bpf_attach_target_info *tgt_info)
 {
-	return ERR_PTR(-EOPNOTSUPP);
+	return NULL;
 }
 static inline void bpf_trampoline_put(struct bpf_trampoline *tr) {}
 #define DEFINE_BPF_DISPATCHER(name)
@@ -2164,12 +2164,12 @@ static inline bool bpf_allow_uninit_stack(void)
 
 static inline bool bpf_bypass_spec_v1(void)
 {
-	return perfmon_capable();
+	return cpu_mitigations_off() || perfmon_capable();
 }
 
 static inline bool bpf_bypass_spec_v4(void)
 {
-	return perfmon_capable();
+	return cpu_mitigations_off() || perfmon_capable();
 }
 
 int bpf_map_new_fd(struct bpf_map *map, int flags);

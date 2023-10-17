@@ -736,7 +736,7 @@ static inline void bpf_compute_and_save_data_end(
 	cb->data_end  = skb->data + skb_headlen(skb);
 }
 
-/* Restore data saved by bpf_compute_data_pointers(). */
+/* Restore data saved by bpf_compute_and_save_data_end(). */
 static inline void bpf_restore_data_end(
 	struct sk_buff *skb, void *saved_data_end)
 {
@@ -1024,12 +1024,6 @@ int xdp_do_redirect_frame(struct net_device *dev,
 			  struct xdp_frame *xdpf,
 			  struct bpf_prog *prog);
 void xdp_do_flush(void);
-
-/* The xdp_do_flush_map() helper has been renamed to drop the _map suffix, as
- * it is no longer only flushing maps. Keep this define for compatibility
- * until all drivers are updated - do not use xdp_do_flush_map() in new code!
- */
-#define xdp_do_flush_map xdp_do_flush
 
 void bpf_warn_invalid_xdp_action(struct net_device *dev, struct bpf_prog *prog, u32 act);
 
@@ -1335,6 +1329,7 @@ struct bpf_sock_addr_kern {
 	 */
 	u64 tmp_reg;
 	void *t_ctx;	/* Attach type specific context. */
+	u32 uaddrlen;
 };
 
 struct bpf_sock_ops_kern {
