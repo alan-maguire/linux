@@ -46,6 +46,11 @@
 #define RA_MASK_HE_3SS_RATES	GENMASK_ULL(47, 36)
 #define RA_MASK_HE_4SS_RATES	GENMASK_ULL(59, 48)
 #define RA_MASK_HE_RATES	GENMASK_ULL(59, 12)
+#define RA_MASK_EHT_1SS_RATES	GENMASK_ULL(27, 12)
+#define RA_MASK_EHT_2SS_RATES	GENMASK_ULL(43, 28)
+#define RA_MASK_EHT_3SS_RATES	GENMASK_ULL(59, 44)
+#define RA_MASK_EHT_4SS_RATES	GENMASK_ULL(62, 60)
+#define RA_MASK_EHT_RATES	GENMASK_ULL(62, 12)
 
 #define CFO_TRK_ENABLE_TH (2 << 2)
 #define CFO_TRK_STOP_TH_4 (30 << 2)
@@ -400,6 +405,13 @@ struct rtw89_physts_regs {
 	u32 dis_trigger_brk_mask;
 };
 
+struct rtw89_cfo_regs {
+	u32 comp;
+	u32 weighting_mask;
+	u32 comp_seg0;
+	u32 valid_0_mask;
+};
+
 enum rtw89_bandwidth_section_num_ax {
 	RTW89_BW20_SEC_NUM_AX = 8,
 	RTW89_BW40_SEC_NUM_AX = 4,
@@ -470,6 +482,7 @@ struct rtw89_phy_gen_def {
 	u32 cr_base;
 	const struct rtw89_ccx_regs *ccx;
 	const struct rtw89_physts_regs *physts;
+	const struct rtw89_cfo_regs *cfo;
 
 	void (*set_txpwr_byrate)(struct rtw89_dev *rtwdev,
 				 const struct rtw89_chan *chan,

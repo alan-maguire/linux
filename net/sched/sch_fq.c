@@ -383,6 +383,10 @@ static struct fq_flow *fq_classify(struct Qdisc *sch, struct sk_buff *skb,
 
 	if (fq_fastpath_check(sch, skb, now)) {
 		q->internal.stat_fastpath_packets++;
+		if (skb->sk == sk && q->rate_enable &&
+		    READ_ONCE(sk->sk_pacing_status) != SK_PACING_FQ)
+			smp_store_release(&sk->sk_pacing_status,
+					  SK_PACING_FQ);
 		return &q->internal;
 	}
 
@@ -651,7 +655,7 @@ static struct sk_buff *fq_dequeue(struct Qdisc *sch)
 begin:
 	head = fq_pband_head_select(pband);
 	if (!head) {
-		while (++retry < FQ_BANDS) {
+		while (++retry <= FQ_BANDS) {
 			if (++q->band_nr == FQ_BANDS)
 				q->band_nr = 0;
 			pband = &q->band_flows[q->band_nr];
@@ -893,7 +897,7 @@ static int fq_resize(struct Qdisc *sch, u32 log)
 	return 0;
 }
 
-static struct netlink_range_validation iq_range = {
+static const struct netlink_range_validation iq_range = {
 	.max = INT_MAX,
 };
 
@@ -915,14 +919,8 @@ static const struct nla_policy fq_policy[TCA_FQ_MAX + 1] = {
 	[TCA_FQ_TIMER_SLACK]		= { .type = NLA_U32 },
 	[TCA_FQ_HORIZON]		= { .type = NLA_U32 },
 	[TCA_FQ_HORIZON_DROP]		= { .type = NLA_U8 },
-	[TCA_FQ_PRIOMAP]		= {
-			.type = NLA_BINARY,
-			.len = sizeof(struct tc_prio_qopt),
-		},
-	[TCA_FQ_WEIGHTS]		= {
-			.type = NLA_BINARY,
-			.len = FQ_BANDS * sizeof(s32),
-		},
+	[TCA_FQ_PRIOMAP]		= NLA_POLICY_EXACT_LEN(sizeof(struct tc_prio_qopt)),
+	[TCA_FQ_WEIGHTS]		= NLA_POLICY_EXACT_LEN(FQ_BANDS * sizeof(s32)),
 };
 
 /* compress a u8 array with all elems <= 3 to an array of 2-bit fields */
