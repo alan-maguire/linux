@@ -1119,7 +1119,9 @@ static int __dev_alloc_name(struct net *net, const char *name, char *res)
 	if (i == max_netdevices)
 		return -ENFILE;
 
-	snprintf(res, IFNAMSIZ, name, i);
+	/* 'res' and 'name' could overlap, use 'buf' as an intermediate buffer */
+	strscpy(buf, name, IFNAMSIZ);
+	snprintf(res, IFNAMSIZ, buf, i);
 	return i;
 }
 
@@ -11179,16 +11181,18 @@ int __dev_change_net_namespace(struct net_device *dev, struct net *net,
 	dev_net_set(dev, net);
 	dev->ifindex = new_ifindex;
 
-	/* Send a netdev-add uevent to the new namespace */
-	kobject_uevent(&dev->dev.kobj, KOBJ_ADD);
-	netdev_adjacent_add_links(dev);
-
 	if (new_name[0]) /* Rename the netdev to prepared name */
 		strscpy(dev->name, new_name, IFNAMSIZ);
 
 	/* Fixup kobjects */
+	dev_set_uevent_suppress(&dev->dev, 1);
 	err = device_rename(&dev->dev, dev->name);
+	dev_set_uevent_suppress(&dev->dev, 0);
 	WARN_ON(err);
+
+	/* Send a netdev-add uevent to the new namespace */
+	kobject_uevent(&dev->dev.kobj, KOBJ_ADD);
+	netdev_adjacent_add_links(dev);
 
 	/* Adapt owner in case owning user namespace of target network
 	 * namespace is different from the original one.
