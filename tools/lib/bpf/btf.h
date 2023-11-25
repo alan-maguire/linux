@@ -225,9 +225,18 @@ struct btf_dedup_opts {
 	struct btf_ext *btf_ext;
 	/* force hash collisions (used for testing) */
 	bool force_collisions;
+	/* optionally generate new base BTF which is the minimal base BTF
+	 * required for the split BTF; this allows for a more efficient
+	 * base + split BTF representation while still retaining information
+	 * about the base types used in the split BTF representation.
+	 * The BTF passed in will be deduplicated relative to the new
+	 * minimal base BTF, and will be set to be the base BTF of the
+	 * BTF passed in.  It can be retrieved via btf__base(btf).
+	 */
+	bool gen_base_btf_minimal;
 	size_t :0;
 };
-#define btf_dedup_opts__last_field force_collisions
+#define btf_dedup_opts__last_field gen_base_btf_minimal
 
 LIBBPF_API int btf__dedup(struct btf *btf, const struct btf_dedup_opts *opts);
 

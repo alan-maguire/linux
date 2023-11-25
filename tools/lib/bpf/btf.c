@@ -95,6 +95,10 @@ struct btf {
 	 * split BTF is based
 	 */
 	struct btf *base_btf;
+	/* if true, the base BTF is "base minimal" BTF and needs to be freed
+	 * with btf__free(), since it was allocated during dedup.
+	 */
+	bool min_base_btf;
 	/* BTF type ID of the first type in this BTF instance:
 	 *   - for base BTF it's equal to 1;
 	 *   - for split BTF it's equal to biggest type ID of base BTF plus 1.
@@ -969,6 +973,9 @@ void btf__free(struct btf *btf)
 	free(btf->raw_data);
 	free(btf->raw_data_swapped);
 	free(btf->type_offs);
+	/* Minimal base BTF was allocated during dedup, needs to be freed. */
+	if (btf->min_base_btf)
+		btf__free(btf->base_btf);
 	free(btf);
 }
 
@@ -1670,6 +1677,27 @@ int btf__find_str(struct btf *btf, const char *s)
 	return btf->start_str_off + off;
 }
 
+/* Add a string s to the BTF string section, without consulting base BTF.
+ * Returns:
+ *   - > 0 offset into string section, on success;
+ *   - < 0, on error.
+ */
+static int btf_add_str(struct btf *btf, const char *s)
+{
+	int off;
+
+	if (btf_ensure_modifiable(btf))
+		return libbpf_err(-ENOMEM);
+
+	off = strset__add_str(btf->strs_set, s);
+	if (off < 0)
+		return libbpf_err(off);
+
+	btf->hdr->str_len = strset__data_size(btf->strs_set);
+
+	return btf->start_str_off + off;
+}
+
 /* Add a string s to the BTF string section.
  * Returns:
  *   - > 0 offset into string section, on success;
@@ -1684,17 +1712,7 @@ int btf__add_str(struct btf *btf, const char *s)
 		if (off != -ENOENT)
 			return off;
 	}
-
-	if (btf_ensure_modifiable(btf))
-		return libbpf_err(-ENOMEM);
-
-	off = strset__add_str(btf->strs_set, s);
-	if (off < 0)
-		return libbpf_err(off);
-
-	btf->hdr->str_len = strset__data_size(btf->strs_set);
-
-	return btf->start_str_off + off;
+	return btf_add_str(btf, s);
 }
 
 static void *btf_add_type_mem(struct btf *btf, size_t add_sz)
@@ -3055,6 +3073,7 @@ static int btf_dedup_prim_types(struct btf_dedup *d);
 static int btf_dedup_struct_types(struct btf_dedup *d);
 static int btf_dedup_ref_types(struct btf_dedup *d);
 static int btf_dedup_resolve_fwds(struct btf_dedup *d);
+static int btf_dedup_base_minimal(struct btf_dedup *d);
 static int btf_dedup_compact_types(struct btf_dedup *d);
 static int btf_dedup_remap_types(struct btf_dedup *d);
 
@@ -3245,6 +3264,13 @@ int btf__dedup(struct btf *btf, const struct btf_dedup_opts *opts)
 		pr_debug("btf_dedup_ref_types failed:%d\n", err);
 		goto done;
 	}
+	if (opts && opts->gen_base_btf_minimal) {
+		err = btf_dedup_base_minimal(d);
+		if (err < 0) {
+			pr_debug("btf_dedup_base_minimal failed:%d\n", err);
+			goto done;
+		}
+	}
 	err = btf_dedup_compact_types(d);
 	if (err < 0) {
 		pr_debug("btf_dedup_compact_types failed:%d\n", err);
@@ -3298,6 +3324,8 @@ struct btf_dedup {
 	struct btf_dedup_opts opts;
 	/* temporary strings deduplication state */
 	struct strset *strs_set;
+	/* minimal base BTF, generated via btf_dedup_base_minimal() */
+	struct btf *min_base_btf;
 };
 
 static long hash_combine(long h, long value)
@@ -4806,6 +4834,311 @@ static int btf_dedup_resolve_fwds(struct btf_dedup *d)
 
 exit:
 	hashmap__free(names_map);
+	return err;
+}
+
+static int btf_get_fwd_kind(const struct btf_type *t)
+{
+	switch (btf_kind(t)) {
+	case BTF_KIND_STRUCT:
+		return BTF_FWD_STRUCT;
+	case BTF_KIND_UNION:
+		return BTF_FWD_UNION;
+	case BTF_KIND_ENUM:
+		return BTF_FWD_ENUM;
+	default:
+		return -EINVAL;
+	}
+}
+
+/* Replace string offsets in BTF with equivalents we add to minimal BTF. */
+static int btf_dedup_minimal_add_str(__u32 *str_off, void *ctx)
+{
+	struct btf_dedup *d = ctx;
+	const char *str = btf__str_by_offset(d->btf, *str_off);
+
+	if (!str || !str[0])
+		*str_off = 0;
+	else
+		*str_off = btf__add_str(d->min_base_btf, str);
+	return 0;
+}
+
+static int btf_dedup_minimal_add_type(__u32 *type_id, void *ctx)
+{
+	struct btf_dedup *d = ctx;
+	const struct btf_type *t;
+	struct btf_type *m;
+	int len, err;
+
+	/* already processed */
+	if (d->hypot_map[*type_id] <= BTF_MAX_NR_TYPES)
+		return 0;
+
+	t = btf__type_by_id(d->btf, *type_id);
+	len = btf_type_size(t);
+	if (len < 0)
+		return len;
+	m = btf_add_type_mem(d->min_base_btf, len);
+	if (!m)
+		return -ENOMEM;
+	memcpy(m, t, len);
+	err = btf_type_visit_str_offs(m, btf_dedup_minimal_add_str, d);
+	if (err < 0)
+		return err;
+	err = btf_commit_type(d->min_base_btf, len);
+	if (err < 0)
+		return err;
+	d->hypot_map[*type_id] = err;
+
+	return 0;
+}
+
+static int btf_dedup_minimal_rewrite_type_id(__u32 *type_id, void *ctx)
+{
+	struct btf_dedup *d = ctx;
+	__u32 nr_base_types = d->btf->base_btf->nr_types;
+
+	if (*type_id <= nr_base_types) {
+		*type_id = d->hypot_map[*type_id];
+	} else {
+		__u32 diff_id = nr_base_types - d->min_base_btf->nr_types;
+
+		*type_id = *type_id - diff_id;
+	}
+	if (*type_id > BTF_MAX_NR_TYPES)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int btf_dedup_minimal_rewrite_split_str_off(__u32 *str_off, void *ctx)
+{
+	struct btf_dedup *d = ctx;
+	const char *str;
+	__u32 str_diff;
+	int off;
+
+	if (*str_off == 0)
+		return 0;
+
+	str_diff = d->btf->base_btf->hdr->str_len - d->min_base_btf->hdr->str_len;
+	if (*str_off >= d->btf->start_str_off) {
+		/* in split BTF, so adjust offset. */
+		*str_off -= str_diff;
+		return 0;
+	}
+	str = btf__str_by_offset(d->btf, *str_off);
+	/* string may be in base BTF, but not min base BTF. */
+	off = btf__find_str(d->min_base_btf, str);
+	if (off > 0) {
+		*str_off = off;
+		return 0;
+	}
+	/* String is in base BTF, but _not_ min base BTF, so needs to be
+	 * added.  Note we call btf_add_str() as we do not want to
+	 * fall back to checking the base BTF, since we know the string
+	 * is there.
+	 */
+	off = btf_add_str(d->btf, str);
+	if (off < 0)
+		return off;
+	/* newly added string offset needs to be adjusted also. */
+	*str_off = off - str_diff;
+	return 0;
+}
+
+/* At this point, we have a mapping from split to canonical types via d->map.
+ * Considering all instances where d->map[id] points to a base BTF id, this
+ * subset represents all the types in base BTF that are strictly required
+ * for the split BTF representation.
+ *
+ * So the aim here is to:
+ *
+ * 1. generate a minimal base BTF using those types and their dependents only;
+ * 2. swap base minimal BTF for the original (larger) base BTF so that we can
+ * 3. complete dedup against the "base minimal" BTF.
+ *
+ * The reason for doing this is that we can both deduplicate - taking advantage
+ * of the split BTF approach - while also carrying a minimized base BTF
+ * representation.  That minimal base BTF can then be used to verify
+ * compatibility of the split BTF with a (possibly changed) base.  One example
+ * of this is for modules, where we compile against base vmlinux BTF and then
+ * want to use the split module BTF with a later (and possibly changed) base.
+ * Since we carry the relevant subset of the base BTF as it was at the time of
+ * split BTF generation, we are in a position to assess compatibility.
+ */
+static int btf_dedup_base_minimal(struct btf_dedup *d)
+{
+	__u32 i, id, map_id, diff_id;
+	const struct btf_type *t;
+	int err = 0;
+
+	/* no base BTF means nothing to do. */
+	if (!d->btf->base_btf)
+		return 0;
+	/* Re-use the hypot_map to map from original BTF ids to new minimal
+	 * base or split BTF ids.
+	 */
+	d->hypot_map[0] = 0;
+	for (i = 1; i < btf__type_cnt(d->btf); i++)
+		d->hypot_map[i] = BTF_UNPROCESSED_ID;
+
+	d->min_base_btf = btf__new_empty();
+	err = libbpf_get_error(d->min_base_btf);
+	if (err) {
+		pr_debug("could not create minimal base BTF: %d\n", err);
+		return err;
+	}
+	if (btf_ensure_modifiable(d->min_base_btf)) {
+		pr_debug("no memory to modify minimal base BTF\n");
+		err = -ENOMEM;
+		goto err_out;
+	}
+
+	/* First, copy types which map to base BTF.  These are the types
+	 * that will be deduplicated with base BTF, so we know base minimal
+	 * BTF needs them.  Skip fwds for now as they either refer to base
+	 * BTF (in which case they will be handled below) or don't (in which
+	 * case they aren't needed in minimal base BTF).
+	 */
+	for (i = 0, id = d->btf->start_id; i < d->btf->nr_types; i++, id++) {
+		t = btf__type_by_id(d->btf, id);
+		map_id = resolve_type_id(d, id);
+		if (btf_is_fwd(t))
+			continue;
+		if (map_id >= d->btf->start_id || map_id == 0)
+			continue;
+		err = btf_dedup_minimal_add_type(&map_id, d);
+		if (err < 0) {
+			pr_debug("could not add '%s' to minimal base BTF: %d\n",
+				 btf__name_by_offset(d->btf, t->name_off), err);
+			goto err_out;
+		}
+	}
+	/* This initial set of minimal base types themselves reference types.
+	 * Add these also.  Here we skip adding references from pointers to types
+	 * that can be expressed as fwds (struct/union/enum) since we do not
+	 * want to add the associated type unless it is needed; if the associated
+	 * struct/union/enum was in the split BTF (not as a fwd, but as a full type)
+	 * we would know it was needed.  Those case are handled above.
+	 */
+	for (id = 1; id <= d->min_base_btf->nr_types; id++) {
+		t = btf__type_by_id(d->min_base_btf, id);
+		if (btf_kind(t) == BTF_KIND_PTR) {
+			const struct btf_type *r = btf__type_by_id(d->btf, t->type);
+
+			if (btf_get_fwd_kind(r) >= 0)
+				continue;
+		}
+		err = btf_type_visit_type_ids((struct btf_type *)t,
+					      btf_dedup_minimal_add_type, d);
+		if (err) {
+			pr_debug("could not rewrite type ids for '%s'[%d]: %d\n",
+				 btf__name_by_offset(d->btf, t->name_off), id, err);
+			goto err_out;
+		}
+	}
+	/* We skipped adding references from pointers to types expressible as
+	 * fwds since at this point we know that the split BTF does not refer
+	 * to them (except possibly also as fwds), and that the minimal base
+	 * BTF only refers to them via pointers to the type.  As a result, we
+	 * now know we can safely add these types as fwds.
+	 */
+	for (id = 1; id <= d->min_base_btf->nr_types; id++) {
+		enum btf_fwd_kind fwd_kind;
+
+		t = btf__type_by_id(d->min_base_btf, id);
+		if (btf_kind(t) != BTF_KIND_PTR)
+			continue;
+		map_id = t->type;
+		if (d->hypot_map[map_id] <= BTF_MAX_NR_TYPES)
+			continue;
+		t = btf__type_by_id(d->btf, map_id);
+		fwd_kind = btf_get_fwd_kind(t);
+		if (fwd_kind < 0)
+			continue;
+		err = btf__add_fwd(d->min_base_btf, btf__name_by_offset(d->btf, t->name_off),
+				   fwd_kind);
+		if (err < 0) {
+			pr_debug("adding fwd '%s' to minimal BTF failed: %d\n",
+				 btf__name_by_offset(d->btf, t->name_off), err);
+			goto err_out;
+		}
+		d->hypot_map[map_id] = err;
+	}
+	/* Now we have minimal BTF with all types needed by split BTF.  Strings
+	 * have been added, but we now need to correct type id references in
+	 * minimal base BTF.  The hypot_map maps from the original base id to
+	 * corresponding minimal base id, so it will be used to correct references.
+	 */
+	for (id = 1; id <= d->min_base_btf->nr_types; id++) {
+		t = btf__type_by_id(d->min_base_btf, id);
+		err = btf_type_visit_type_ids((struct btf_type *)t,
+					      btf_dedup_minimal_rewrite_type_id, d);
+		if (err) {
+			pr_debug("rewriting ids for %s[%d] in minimal BTF failed: %d\n",
+				 btf__name_by_offset(d->min_base_btf, t->name_off), id, err);
+			goto err_out;
+		}
+	}
+	/* At this point, d->min_base_btf is done; we have added all types split
+	 * BTF depends on (and their dependents), and have updated string and
+	 * type references to be consistent.  Next we need to adjust the split
+	 * BTF to both refer to the base minimal types where appropriate, and
+	 * to adjust its internal type references so that they start just after
+	 * the last base minimal BTF id instead of after the last base BTF id.
+	 * String references to base BTF will also need adjusting, since they
+	 * are based upon the string section size (which has changed between
+	 * base and minimal base BTF), and because some strings may be present
+	 * in base BTF but absent in minimal base BTF.
+	 */
+	for (i = 0, id = d->btf->start_id; i < d->btf->nr_types; i++, id++) {
+		t = btf__type_by_id(d->btf, id);
+		err = btf_type_visit_str_offs((struct btf_type *)t,
+					      btf_dedup_minimal_rewrite_split_str_off, d);
+		if (err) {
+			pr_debug("rewriting strings for '%s'[%d] in split BTF failed: %d\n",
+				 btf__name_by_offset(d->min_base_btf, t->name_off), id, err);
+			goto err_out;
+		}
+		/* Remap to new split BTF start id. */
+		err = btf_type_visit_type_ids((struct btf_type *)t,
+					      btf_dedup_minimal_rewrite_type_id, d);
+		if (err) {
+			pr_debug("rewriting types for '%s'[%d] in split BTF failed: %d\n",
+				 btf__name_by_offset(d->min_base_btf, t->name_off), id, err);
+			goto err_out;
+		}
+	}
+	/* Next adjust the hypot_map for split BTF so that original split BTF
+	 * references can be mapped to their updated values.
+	 */
+	diff_id = d->btf->base_btf->nr_types - d->min_base_btf->nr_types;
+
+	for (i = 0, id = d->btf->start_id; i < d->btf->nr_types; i++, id++) {
+		map_id = resolve_type_id(d, id);
+		if (map_id >= d->btf->start_id)
+			d->hypot_map[id] = map_id - diff_id;
+		else
+			d->hypot_map[id] = d->hypot_map[map_id];
+	}
+	/* Next adjust the map entries in split BTF to use the hypot_map entries
+	 * since these contain the updated mappings for the old type ids.
+	 */
+	for (i = 0, id = btf__type_cnt(d->min_base_btf); i < d->btf->nr_types; i++, id++)
+		d->map[id] = d->hypot_map[id + diff_id];
+
+	/* Finally switch base BTF to be min_base_btf, since split BTF
+	 * points at its base types now.
+	 */
+	d->btf->base_btf = d->min_base_btf;
+	d->btf->start_id = btf__type_cnt(d->min_base_btf);
+	d->btf->start_str_off = d->min_base_btf->hdr->str_len;
+	d->btf->min_base_btf = true;
+	return 0;
+err_out:
+	btf__free(d->min_base_btf);
 	return err;
 }
 
