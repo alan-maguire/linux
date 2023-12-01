@@ -2,6 +2,7 @@
 
 pahole-ver := $(CONFIG_PAHOLE_VERSION)
 pahole-flags-y :=
+module-pahole-flags-y :=
 
 # pahole 1.18 through 1.21 can't handle zero-sized per-CPU vars
 ifeq ($(call test-le, $(pahole-ver), 121),y)
@@ -16,4 +17,11 @@ pahole-flags-$(CONFIG_PAHOLE_HAS_LANG_EXCLUDE)		+= --lang_exclude=rust
 
 pahole-flags-$(call test-ge, $(pahole-ver), 125)	+= --skip_encoding_btf_inconsistent_proto --btf_gen_optimized
 
+pahole-flags-$(call test-ge, $(pahole-ver), 126)	= -j --lang_exclude=rust --btf_features=encode_force,var,float,decl_tag,type_tag,enum64,optimized_func,consistent_func
+
+ifeq ($(BTF_BASE_MINIMAL),1)
+module-pahole-flags-$(call test-ge, $(pahole-ver), 126)	+= --btf_features=minimal_base
+endif
+
 export PAHOLE_FLAGS := $(pahole-flags-y)
+export MODULE_PAHOLE_FLAGS := $(module-pahole-flags-y)
