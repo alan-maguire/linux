@@ -411,4 +411,6 @@ LIBBPF_1.3.0 {
 } LIBBPF_1.2.0;
 
 LIBBPF_1.4.0 {
+	global:
+		btf__reconcile;
 } LIBBPF_1.3.0;

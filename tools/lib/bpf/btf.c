@@ -5516,3 +5516,15 @@ int btf_ext_visit_str_offs(struct btf_ext *btf_ext, str_off_visit_fn visit, void
 
 	return 0;
 }
+
+int btf_set_base_btf(struct btf *btf, struct btf *base_btf, bool min_base_btf)
+{
+	if (btf->min_base_btf)
+		btf__free(btf->base_btf);
+	btf->base_btf = base_btf;
+	btf->start_id = btf__type_cnt(base_btf);
+	btf->start_str_off = base_btf->hdr->str_len;
+	btf->min_base_btf = min_base_btf;
+
+	return 0;
+}

@@ -373,6 +373,7 @@ int btf_load_into_kernel(struct btf *btf, char *log_buf, size_t log_sz, __u32 lo
 struct btf *btf_get_from_fd(int btf_fd, struct btf *base_btf);
 void btf_get_kernel_prefix_kind(enum bpf_attach_type attach_type,
 				const char **prefix, int *kind);
+int btf_set_base_btf(struct btf *btf, struct btf *base_btf, bool min_base_btf);
 
 struct btf_ext_info {
 	/*

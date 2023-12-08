@@ -173,6 +173,14 @@ LIBBPF_API int btf__add_type(struct btf *btf, const struct btf *src_btf,
  */
 LIBBPF_API int btf__add_btf(struct btf *btf, const struct btf *src_btf);
 
+/**
+ * @brief **btf__reconcile()** will check the split BTF *btf* for references
+ * to base BTF kinds, and verify those references are compatible with
+ * *base_btf*; if they are, *btf* is adjusted such that is re-parented to
+ * *base_btf* and type ids and strings are adjusted to accommodate this.
+ */
+LIBBPF_API int btf__reconcile(struct btf *btf, const struct btf *base_btf);
+
 LIBBPF_API int btf__add_int(struct btf *btf, const char *name, size_t byte_sz, int encoding);
 LIBBPF_API int btf__add_float(struct btf *btf, const char *name, size_t byte_sz);
 LIBBPF_API int btf__add_ptr(struct btf *btf, int ref_type_id);
